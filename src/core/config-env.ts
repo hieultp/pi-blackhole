@@ -27,6 +27,13 @@ export interface EnvParser {
  */
 export const CACHE_RETENTION_VALUES: readonly CacheRetention[] = ["none", "short", "long"];
 
+export const KV_WARM_WORKER_VALUES = ["off", "auto"] as const;
+export type KvWarmWorkers = (typeof KV_WARM_WORKER_VALUES)[number];
+
+export function isKvWarmWorkers(value: unknown): value is KvWarmWorkers {
+  return typeof value === "string" && (KV_WARM_WORKER_VALUES as readonly string[]).includes(value);
+}
+
 /**
  * Canonicalize a raw retention value, or `undefined` when it is not one.
  * Case and surrounding whitespace are normalized so all three entry points
@@ -261,5 +268,21 @@ export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
   cacheRetention: {
     var: "PI_BLACKHOLE_CACHE_RETENTION",
     parse: (raw: string) => normalizeCacheRetention(raw),
+  },
+  kvWarmWorkers: {
+    var: "PI_BLACKHOLE_KV_WARM_WORKERS",
+    parse: (raw: string) => {
+      const value = raw.trim().toLowerCase();
+      return isKvWarmWorkers(value) ? value : undefined;
+    },
+  },
+  kvWarmStaleMs: {
+    var: "PI_BLACKHOLE_KV_WARM_STALE_MS",
+    parse: (raw: string) => {
+      const value = Number(raw);
+      return Number.isInteger(value) && value > 0 && value <= MAX_TIMER_DELAY_MS
+        ? value
+        : undefined;
+    },
   },
 };

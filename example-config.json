@@ -126,6 +126,8 @@
   "agentMaxTurns": 16,
   "providerIdleTimeoutMs": 0,
   "workerAttemptTimeoutMs": 0,
+  "kvWarmWorkers": "off",
+  "kvWarmStaleMs": 600000,
 
   "memory": true,
   "sessionFallback": true,
@@ -161,6 +163,8 @@
     "  dropperPoolFullnessThreshold (0-1, default 0.10) — minimum pool fullness before the dropper may run at all; stops it churning a nearly empty pool",
     "  providerIdleTimeoutMs (ms, 0=disabled, unset=inherit pi default) — body-idle timeout for background provider streams",
     "  workerAttemptTimeoutMs (ms, 0/unset=disabled, max 2147483647) — hard elapsed deadline per worker/model attempt; a configured candidate's timeout engages its cooldown + the next fallback; the session fallback is tried once per stage, with no cooldown",
+    "  kvWarmWorkers (off|auto, default off) — opt-in full-session prefix replay only for an exact OpenAI-compatible worker model/endpoint match; sends the full captured prompt to that same endpoint, is bounded, budget-checked, and falls back to normal tool workers",
+    "  kvWarmStaleMs (default 600000) — maximum age of the in-memory captured request; see docs/CONFIG.md for privacy and cache-hit limits",
     "  cacheRetention (none|short|long, unset=inherit pi's effective setting) — prompt-cache retention for the observer/reflector/dropper streams; left unset here on purpose, since pinning \"short\" downgrades a host whose effective setting is longer. \"long\" is opt-in, and adapters that lack it ignore the value",
     "  compactAfterPreset / compactAfterPresets — auto-compaction preset curve selection + definitions (default curve 0.90@32k → 0.40@1M); replaces the flat 81000 default — a file compactAfterTokens of exactly 81000 is legacy residue and is dropped",
     "",
@@ -176,6 +180,8 @@
     "  PI_BLACKHOLE_RETAINED_TOOL_OUTPUT_MAX_TOKENS → override retained tool-output budget",
     "  PI_BLACKHOLE_REFLECTIONS_POOL_MAX_TOKENS → override reflection output budget",
     "  PI_BLACKHOLE_CACHE_RETENTION → override worker prompt-cache retention (none|short|long)",
+    "  PI_BLACKHOLE_KV_WARM_WORKERS → opt in to eligible KV-warm worker requests (off|auto)",
+    "  PI_BLACKHOLE_KV_WARM_STALE_MS → override captured-request age limit",
     "  PI_BLACKHOLE_SHOW_WORKER_NOTIFICATIONS → override routine worker progress toasts",
     "  PI_BLACKHOLE_RECALL_RESPONSE_MAX_CHARS → override the recall response cap"
   ]

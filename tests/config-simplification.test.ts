@@ -50,6 +50,8 @@ afterEach(() => {
   delete process.env.PI_OBSERVATIONAL_MEMORY_PASSIVE;
   delete process.env.PI_BLACKHOLE_COMPACTION;
   delete process.env.PI_BLACKHOLE_COMPACTION_ENGINE;
+  delete process.env.PI_BLACKHOLE_KV_WARM_WORKERS;
+  delete process.env.PI_BLACKHOLE_KV_WARM_STALE_MS;
   try {
     rmSync(testDir, { recursive: true, force: true });
   } catch {
@@ -68,6 +70,8 @@ describe("New config keys — defaults", () => {
     expect(config.compactionEngine).toBe("blackhole");
     expect(config.tailBehavior).toBe("minimal");
     expect(config.midRunCompaction).toBe("off");
+    expect(config.kvWarmWorkers).toBe("off");
+    expect(config.kvWarmStaleMs).toBe(600_000);
   });
 
   it("T1a: existing configs without midRunCompaction remain off", async () => {
@@ -143,6 +147,31 @@ describe("New key parsing", () => {
     writeConfig({ compactionEngine: "hybrid" });
     const config = loadUnifiedConfig(testDir);
     expect(config.compactionEngine).toBe("blackhole");
+  });
+
+  it("parses KV-warm opt-in and bounded capture age from file and environment", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    writeConfig({ kvWarmWorkers: "auto", kvWarmStaleMs: 120_000 });
+    expect(loadUnifiedConfig(testDir)).toMatchObject({
+      kvWarmWorkers: "auto",
+      kvWarmStaleMs: 120_000,
+    });
+
+    process.env.PI_BLACKHOLE_KV_WARM_WORKERS = " AUTO ";
+    process.env.PI_BLACKHOLE_KV_WARM_STALE_MS = "300000";
+    expect(loadUnifiedConfig(testDir)).toMatchObject({
+      kvWarmWorkers: "auto",
+      kvWarmStaleMs: 300_000,
+    });
+  });
+
+  it("drops invalid KV-warm config values back to safe defaults", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    writeConfig({ kvWarmWorkers: "always", kvWarmStaleMs: 0 });
+    expect(loadUnifiedConfig(testDir)).toMatchObject({
+      kvWarmWorkers: "off",
+      kvWarmStaleMs: 600_000,
+    });
   });
 });
 

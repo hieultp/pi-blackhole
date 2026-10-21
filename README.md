@@ -227,7 +227,7 @@ Three background workers (separate LLM calls) run automatically during the sessi
                     3. DROPPER    (prunes low-value observations)
 ```
 
-Each worker uses an `agentLoop` with tool-calling capabilities — they don't just make a single LLM call. The observer, for example, can call `record_observations` multiple times per run to work through a chunk incrementally.
+By default each worker uses an `agentLoop` with tool-calling capabilities — the observer can call `record_observations` multiple times to work through a chunk incrementally. Optional `kvWarmWorkers: "auto"` can instead try a single JSON reply using a fresh captured session prompt when the exact worker model/endpoint matches and the whole request fits. That sends the full captured transcript to the same endpoint, so enable it only for a trusted provider; it is off by default, falls back to the normal tool worker when ineligible, and cannot guarantee the server will reuse KV. See [`docs/CONFIG.md` → KV-warm workers](docs/CONFIG.md#kvwarmworkers-and-kvwarmstalems).
 
 Optional `observeOnShutdown` (default `false`) makes at most one observer request on an eligible persisted session's unobserved tail before quit, new, resume or fork. The minimum is 200 raw tokens; one shared 20-second deadline covers waiting for in-flight consolidation and the request. No new reflector, dropper, retry or multi-chunk drain is launched. Reload is skipped. Forced exits and hosts with shorter shutdown deadlines may prevent completion. See [shutdown observation](docs/observational-memory.md#session-shutdown-observation).
 

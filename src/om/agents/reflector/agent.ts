@@ -25,7 +25,14 @@ import {
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
-import { truncateRecordContent } from "../../serialize.js";
+import {
+  normalizeReflectionContent,
+  normalizeSupportingObservationIds,
+} from "../record-validation.js";
+export {
+  normalizeReflectionContent,
+  normalizeSupportingObservationIds,
+} from "../record-validation.js";
 import { buildReflectorSystem } from "./prompts.js";
 import {
   RecordReflectionsWithSupersedesSchema,
@@ -100,31 +107,6 @@ interface RunReflectorArgs {
 
 function joinOrEmpty(items: string[]): string {
   return items.length ? items.join("\n") : "(none yet)";
-}
-
-export function normalizeSupportingObservationIds(
-  supportingObservationIds: readonly string[] | undefined,
-  allowedObservationIds: readonly string[],
-): string[] | undefined {
-  if (!supportingObservationIds || supportingObservationIds.length === 0) return undefined;
-  const allowedOrder = new Map<string, number>();
-  for (let i = 0; i < allowedObservationIds.length; i++) {
-    if (!allowedOrder.has(allowedObservationIds[i])) allowedOrder.set(allowedObservationIds[i], i);
-  }
-
-  const seen = new Set<string>();
-  for (const id of supportingObservationIds) {
-    if (!allowedOrder.has(id)) return undefined;
-    seen.add(id);
-  }
-  if (seen.size === 0) return undefined;
-  return Array.from(seen).sort((a, b) => (allowedOrder.get(a) ?? 0) - (allowedOrder.get(b) ?? 0));
-}
-
-function normalizeReflectionContent(content: string): string | undefined {
-  const normalized = truncateRecordContent(content.trim());
-  if (!normalized || /\r|\n/.test(normalized)) return undefined;
-  return normalized;
 }
 
 export interface ReflectorResult {

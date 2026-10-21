@@ -30,8 +30,10 @@ import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { RecordObservationsSchema, type RecordObservationsArgs } from "./tool-schema.js";
-import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
+import { truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
+import { deriveObservationTimestamp, normalizeSourceEntryIds } from "../record-validation.js";
+export { normalizeSourceEntryIds } from "../record-validation.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { debugLog } from "../../debug-log.js";
 import {
@@ -91,29 +93,6 @@ interface RunObserverArgs {
 
 export { OBSERVATION_TIMESTAMP_PATTERN } from "./tool-schema.js";
 
-/**
- * Derive an observation timestamp from its supporting source entries instead of
- * trusting an LLM-reported time. Uses the LATEST supporting entry (the moment the
- * cited evidence was complete); falls back to the current local time when the
- * chunk carries no usable timestamps. Lexicographic comparison is correct for
- * the fixed-width "YYYY-MM-DD HH:MM" format; placeholder timestamps ("????-??-??")
- * are ignored.
- */
-function deriveObservationTimestamp(
-  sourceEntryIds: readonly string[],
-  sourceEntryTimestamps: Record<string, string> | undefined,
-): string {
-  let latest: string | undefined;
-  if (sourceEntryTimestamps) {
-    for (const id of sourceEntryIds) {
-      const t = sourceEntryTimestamps[id];
-      if (!t || t.startsWith("?")) continue;
-      if (!latest || t > latest) latest = t;
-    }
-  }
-  return latest ?? nowTimestamp();
-}
-
 function joinOrEmpty(items: string[]): string {
   return items.length ? items.join("\n") : "(none yet)";
 }
@@ -141,30 +120,6 @@ function contiguousCitedPrefixEnd(
     prefixEnd = id;
   }
   return prefixEnd;
-}
-
-export function normalizeSourceEntryIds(
-  sourceEntryIds: readonly string[] | undefined,
-  allowedSourceEntryIds: readonly string[],
-): string[] | undefined {
-  if (!sourceEntryIds || sourceEntryIds.length === 0) return undefined;
-  const allowedOrder = new Map<string, number>();
-  for (let i = 0; i < allowedSourceEntryIds.length; i++)
-    allowedOrder.set(allowedSourceEntryIds[i], i);
-
-  // Filter out invalid/unknown IDs instead of rejecting the entire batch.
-  // Matches the dropper's normalizeDropObservationIds pattern: one hallucinated
-  // ID from the LLM should not discard valid observations.
-  const seen = new Set<string>();
-  const valid: string[] = [];
-  for (const id of sourceEntryIds) {
-    if (!allowedOrder.has(id)) continue;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    valid.push(id);
-  }
-  if (valid.length === 0) return undefined;
-  return valid.sort((a, b) => (allowedOrder.get(a) ?? 0) - (allowedOrder.get(b) ?? 0));
 }
 
 /** Result returned by runObserver when no observations are recorded. */

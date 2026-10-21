@@ -122,6 +122,7 @@ import {
 } from "./selection.js";
 
 import { DropObservationsSchema, type DropObservationsArgs } from "./tool-schema.js";
+export { normalizeDropObservationIds } from "../record-validation.js";
 
 function joinOrEmpty(items: string[]): string {
   return items.length ? items.join("\n") : "(none yet)";
@@ -137,24 +138,6 @@ function relevanceCounts(
     },
     { low: 0, medium: 0, high: 0, critical: 0 },
   );
-}
-
-export function normalizeDropObservationIds(
-  ids: readonly string[] | undefined,
-  observations: readonly Observation[],
-): string[] | undefined {
-  if (!ids || ids.length === 0) return undefined;
-  const allowed = new Map(observations.map((observation) => [observation.id, observation]));
-  const result: string[] = [];
-  const seen = new Set<string>();
-  for (const id of ids) {
-    const observation = allowed.get(id);
-    if (!observation) continue;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    result.push(id);
-  }
-  return result.length > 0 ? result : undefined;
 }
 
 export async function runDropper(args: RunDropperArgs): Promise<string[] | undefined> {

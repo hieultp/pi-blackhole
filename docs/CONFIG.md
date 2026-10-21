@@ -67,6 +67,8 @@ The config file must contain **valid JSON**. A trailing comma, partial write, or
   "agentMaxTurns": 16,            // Max turns per memory agent
   "providerIdleTimeoutMs": 0,     // Background provider body-idle timeout in ms (0 = disabled, unset = inherit pi default)
   "workerAttemptTimeoutMs": 0,    // Hard elapsed deadline per worker/model attempt (0 or unset = disabled)
+  "kvWarmWorkers": "off",         // "off" | "auto"; default off
+  "kvWarmStaleMs": 600000,         // Discard captured requests after 10 minutes
   // "cacheRetention": "long",    // Optional worker prompt-cache retention: "none" | "short" | "long" (omit = inherit pi's effective setting)
 
   // ── Model configs (edit by hand) ──
@@ -553,6 +555,21 @@ Accepted via plain config, `/blackhole settings`, or `PI_BLACKHOLE_CACHE_RETENTI
 |------|---------|--------|
 | string | unset | `none` \| `short` \| `long` |
 
+### `kvWarmWorkers` and `kvWarmStaleMs`
+
+`kvWarmWorkers` is an opt-in best-effort path for reusing the session model's prompt prefix as a memory-worker request. The default is `"off"`; `"auto"` tries it only when the captured OpenAI-compatible request and the resolved worker have exactly matching provider, API, model ID, and base URL, the projected session's last user text still matches, the capture is fresh, and the full request plus worker prompt/output/retry headroom fits the worker context budget. It only accepts text-only `openai-completions` request bodies. Unsupported provider transports, missing captures, mismatches, oversized inputs, and invalid JSON fall back to the existing chunk-based tool worker.
+
+**Privacy:** enabling `"auto"` can send the full captured session prompt, including its system prompt, transcript, and tool schemas, to that same model endpoint. Use it only when that endpoint is trusted for the entire session context. Capture is kept in memory only, capped at about 1 Mi serialized characters per request and four sessions, and cleared at session shutdown or on an unsupported request. `kvWarmStaleMs` defaults to 600,000 ms (10 minutes) and must be a positive integer no greater than 2,147,483,647 ms.
+
+Warm workers return one validated JSON object and never execute the session's tools. Observer empty results explicitly close coverage; malformed/incomplete output gets one correction attempt, then falls back to the normal worker. Matching text prefixes do not guarantee a provider-side KV hit: the server must support prefix reuse and route requests to a compatible cache slot.
+
+Accepted via plain config, `/blackhole settings`, or `PI_BLACKHOLE_KV_WARM_WORKERS` / `PI_BLACKHOLE_KV_WARM_STALE_MS`.
+
+| Key | Type | Default | Values |
+|-----|------|---------|--------|
+| `kvWarmWorkers` | string | `off` | `off` \| `auto` |
+| `kvWarmStaleMs` | number | `600000` | positive integer ≤ 2,147,483,647 |
+
 ### `providerIdleTimeoutMs`
 
 Body-idle timeout for background provider streams (observer/reflector/dropper worker HTTP requests). Higher values let background memory jobs tolerate longer silent provider intervals without forcing interactive Pi requests to wait equally long. Applied by wrapping the provider `fetch` with an undici dispatcher that injects `bodyTimeout`.
@@ -746,6 +763,7 @@ Integer fields (invalid values fall back; `reflectionsPoolMaxTokens` also accept
 | `PI_BLACKHOLE_AGENT_MAX_TURNS` | `agentMaxTurns` |
 | `PI_BLACKHOLE_PROVIDER_IDLE_TIMEOUT_MS` | `providerIdleTimeoutMs` |
 | `PI_BLACKHOLE_WORKER_ATTEMPT_TIMEOUT_MS` | `workerAttemptTimeoutMs` |
+| `PI_BLACKHOLE_KV_WARM_STALE_MS` | `kvWarmStaleMs` |
 
 Float fields (must be in `(0, 1]`):
 
@@ -766,6 +784,7 @@ Enum fields (invalid values keep the file value; matching is case-insensitive):
 | Variable | Overrides |
 |----------|-----------|
 | `PI_BLACKHOLE_CACHE_RETENTION` | `cacheRetention` (`none` \| `short` \| `long`) |
+| `PI_BLACKHOLE_KV_WARM_WORKERS` | `kvWarmWorkers` (`off` \| `auto`) |
 
 ### Paths and internals
 

@@ -18,7 +18,12 @@ import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ConfigManager } from "../pi-base/config-manager.js";
 import { getPiAgentDir } from "../pi-base/paths.js";
-import { DECLARATIVE_ENV_OVERRIDES } from "../core/config-env.js";
+import {
+  DECLARATIVE_ENV_OVERRIDES,
+  isKvWarmWorkers,
+  KV_WARM_WORKER_VALUES,
+  MAX_TIMER_DELAY_MS,
+} from "../core/config-env.js";
 import {
   CACHE_RETENTION_VALUES,
   DEFAULTS,
@@ -377,6 +382,30 @@ export const config = new ConfigManager<UnifiedConfig>({
       },
     },
     {
+      key: "kvWarmWorkers",
+      type: "enum",
+      label: "KV-warm workers",
+      description:
+        "Opt in to reusing the captured session prompt only for the exact same OpenAI-compatible model and endpoint; otherwise use the normal chunk worker. The full captured prompt is sent to that same endpoint.",
+      value: cfg.kvWarmWorkers,
+      options: KV_WARM_WORKER_VALUES,
+      optionLabels: {
+        off: "off — use normal chunk workers (default)",
+        auto: "auto — warm only when the capture is safe and fits",
+      },
+    },
+    {
+      key: "kvWarmStaleMs",
+      type: "number",
+      label: "KV-warm capture age (ms)",
+      description: "Discard a captured session request after this age; default 10 minutes",
+      value: cfg.kvWarmStaleMs,
+      integer: true,
+      min: 1,
+      max: MAX_TIMER_DELAY_MS,
+      step: 10_000,
+    },
+    {
       key: "workerAttemptTimeoutMs",
       type: "number",
       label: "Worker attempt timeout (ms)",
@@ -567,6 +596,7 @@ export const config = new ConfigManager<UnifiedConfig>({
     } else {
       delete parsed.cacheRetention;
     }
+    if (!isKvWarmWorkers(parsed.kvWarmWorkers)) delete parsed.kvWarmWorkers;
 
     // ── Merge with defaults ──
     const merged = { ...DEFAULTS, ...parsed } as UnifiedConfig;
@@ -584,6 +614,7 @@ export const config = new ConfigManager<UnifiedConfig>({
       "observerChunkMaxTokens",
       "observerPreambleMaxTokens",
       "agentMaxTurns",
+      "kvWarmStaleMs",
     ];
     for (const k of REQUIRED_NUMERIC_KEYS) {
       // SAFETY: merged is a plain config object; indexing by dynamic key needs
@@ -593,8 +624,11 @@ export const config = new ConfigManager<UnifiedConfig>({
       if (
         typeof v !== "number" ||
         !Number.isFinite(v) ||
-        ((k === "retainedToolOutputMaxTokens" || k === "reflectionsPoolMaxTokens") &&
+        ((k === "retainedToolOutputMaxTokens" ||
+          k === "reflectionsPoolMaxTokens" ||
+          k === "kvWarmStaleMs") &&
           !Number.isInteger(v)) ||
+        (k === "kvWarmStaleMs" && v > MAX_TIMER_DELAY_MS) ||
         v < minVal
       ) {
         // SAFETY: dynamic-key write as above; DEFAULTS[k] is always a number

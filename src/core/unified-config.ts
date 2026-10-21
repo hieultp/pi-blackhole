@@ -13,9 +13,12 @@ import {
   DECLARATIVE_ENV_OVERRIDES,
   MAX_TIMER_DELAY_MS,
   normalizeCacheRetention,
+  KV_WARM_WORKER_VALUES,
+  isKvWarmWorkers,
+  type KvWarmWorkers,
 } from "./config-env.js";
 
-export { CACHE_RETENTION_VALUES, normalizeCacheRetention };
+export { CACHE_RETENTION_VALUES, normalizeCacheRetention, KV_WARM_WORKER_VALUES, isKvWarmWorkers };
 import { getAgentDir as originalGetAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CacheRetention, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
@@ -255,6 +258,10 @@ export interface UnifiedConfig {
    *  `short`); adapters ignore values they do not support, so `long` is
    *  opt-in rather than our default. */
   cacheRetention?: CacheRetention;
+  /** Reuse a captured matching OpenAI-compatible session prompt as the worker prefix. */
+  kvWarmWorkers: KvWarmWorkers;
+  /** Maximum age of a captured provider request before it is discarded. */
+  kvWarmStaleMs: number;
 
   /** Base model override for all memory workers. */
   model?: OmModelConfig;
@@ -348,6 +355,8 @@ export const DEFAULTS: UnifiedConfig = {
   providerIdleTimeoutMs: undefined,
   workerAttemptTimeoutMs: undefined,
   cacheRetention: undefined,
+  kvWarmWorkers: "off",
+  kvWarmStaleMs: 600_000,
 
   memory: true,
   debugLog: false,
@@ -577,6 +586,17 @@ export function normalizeThresholdKnobs(rec: Record<string, unknown>): void {
   ) {
     delete rec.workerAttemptTimeoutMs;
   }
+  const kvWarmStaleMs = rec.kvWarmStaleMs;
+  if (
+    !(
+      typeof kvWarmStaleMs === "number" &&
+      Number.isInteger(kvWarmStaleMs) &&
+      kvWarmStaleMs > 0 &&
+      kvWarmStaleMs <= MAX_TIMER_DELAY_MS
+    )
+  ) {
+    delete rec.kvWarmStaleMs;
+  }
 }
 
 function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
@@ -595,6 +615,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   // normalized so a hand-edited "LONG" resolves the same as the env var's.
   const cacheRetention = normalizeCacheRetention(raw.cacheRetention);
   if (cacheRetention) c.cacheRetention = cacheRetention;
+  if (isKvWarmWorkers(raw.kvWarmWorkers)) c.kvWarmWorkers = raw.kvWarmWorkers;
 
   // Threshold knobs (compactAfterTokens / Ratio / Reserve / Preset /
   // Presets / providerIdleTimeoutMs / workerAttemptTimeoutMs) — copied bluntly, then scrubbed by the
@@ -612,6 +633,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     "compactAfterPresets",
     "providerIdleTimeoutMs",
     "workerAttemptTimeoutMs",
+    "kvWarmStaleMs",
   ] as const;
 
   // Provider-aware skip list (entries: provider or "provider:api")

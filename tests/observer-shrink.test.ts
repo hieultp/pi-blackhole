@@ -59,13 +59,22 @@ interface ObserverStageInput {
 }
 
 const runObserverSpy = vi.hoisted(() => vi.fn<(input: ObserverStageInput) => Promise<unknown>>());
+const runWarmObserverSpy = vi.hoisted(() =>
+  vi.fn<(input: ObserverStageInput & { chain: unknown }) => Promise<unknown>>(),
+);
 
 vi.mock("../src/om/agents/observer/agent.js", () => ({
   runObserver: runObserverSpy,
 }));
 
-function ctxWith(entries: TestEntry[]): ConsolidationCtx {
+vi.mock("../src/om/kv-warm.js", async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
+  runWarmObserver: (input: ObserverStageInput & { chain: unknown }) => runWarmObserverSpy(input),
+}));
+
+function ctxWith(entries: TestEntry[], kvWarmChain?: unknown): ConsolidationCtx {
   return {
+    ...(kvWarmChain ? { kvWarmChain: kvWarmChain as any } : {}),
     cwd: "/tmp",
     hasUI: false,
     ui: undefined,
@@ -99,12 +108,12 @@ function testModel(provider: string, id: string, contextWindow: number, maxToken
   } as any;
 }
 
-function runStage(runtime: Runtime, entries: TestEntry[], resolved: any) {
+function runStage(runtime: Runtime, entries: TestEntry[], resolved: any, kvWarmChain?: unknown) {
   const generation = runtime.captureGeneration("test-session");
   return runObserverStage(
     { appendEntry: vi.fn() } as any,
     runtime,
-    ctxWith(entries),
+    ctxWith(entries, kvWarmChain),
     generation,
     async () => resolved,
   );
@@ -124,6 +133,8 @@ beforeEach(() => {
   mkdirSync(testDir, { recursive: true });
   runObserverSpy.mockReset();
   runObserverSpy.mockResolvedValue(emptyResult());
+  runWarmObserverSpy.mockReset();
+  runWarmObserverSpy.mockResolvedValue(emptyResult());
   recordCooldownSpy.mockClear();
   debugEvents.length = 0;
 });
@@ -171,6 +182,55 @@ describe("measured worker prompt budget", () => {
 });
 
 describe("observer shrink-to-fit", () => {
+  test("uses KV-warm for a normal observer batch", async () => {
+    const entries = [rawMessage("warm0", textForTokens(100, "WARM"))];
+    const runtime = makeRuntime(1, 10_000);
+    const chain = { invalidated: false };
+
+    const outcome = await runStage(
+      runtime,
+      entries,
+      testModel("test-warm", "warm-normal", 100_000),
+      chain,
+    );
+
+    expect(outcome).toBe("continue");
+    expect(runWarmObserverSpy).toHaveBeenCalledOnce();
+    expect(runObserverSpy).not.toHaveBeenCalled();
+  });
+
+  test("uses KV-warm for each observer batch after shrink-to-fit", async () => {
+    const entries = [
+      rawMessage("m0", textForTokens(23_400, "BIG-A")),
+      rawMessage("m1", textForTokens(23_400, "BIG-B")),
+      rawMessage("m2", textForTokens(23_400, "BIG-C")),
+    ];
+    const runtime = makeRuntime(100, 1_000_000);
+    runtime.config.sessionFallback = false;
+    runtime.config.observerModel = { provider: "test-shr", id: "warm-shrink" };
+    const registry = fakeRegistry(40_000, 2000);
+    const chain = { invalidated: false };
+    const baseCtx = ctxWith(entries);
+    const generation = runtime.captureGeneration("test-session");
+    const { makeModelResolver } = await import("../src/om/consolidation.js");
+    const outcome = await runObserverStage(
+      { appendEntry: vi.fn() } as any,
+      runtime,
+      { ...ctxWith(entries, chain), modelRegistry: registry },
+      generation,
+      makeModelResolver(runtime, { ...baseCtx, modelRegistry: registry }, generation),
+    );
+
+    expect(outcome).toBe("continue");
+    expect(runWarmObserverSpy).toHaveBeenCalledTimes(3);
+    expect(runObserverSpy).not.toHaveBeenCalled();
+    expect(runWarmObserverSpy.mock.calls.map(([args]) => args.allowedSourceEntryIds)).toEqual([
+      ["m0"],
+      ["m1"],
+      ["m2"],
+    ]);
+  });
+
   /** Registry double resolving one candidate with a fixed window. */
   function fakeRegistry(contextWindow: number, maxTokens?: number) {
     return {

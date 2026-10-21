@@ -43,6 +43,14 @@ import {
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
 import { OBSERVER_SYSTEM } from "./agents/observer/prompts.js";
+import {
+  getKvWarmChain,
+  runWarmDropper,
+  runWarmObserver,
+  runWarmOrFallback,
+  runWarmReflector,
+  type KvWarmChain,
+} from "./kv-warm.js";
 
 import {
   readPendingState,
@@ -128,8 +136,10 @@ export type ConsolidationCtx = {
   sessionManager: {
     getBranch: () => unknown;
     getSessionId: () => string;
+    buildSessionProjection?: () => { messages?: unknown };
     isPersisted?: () => boolean;
   };
+  kvWarmChain?: KvWarmChain;
 };
 
 type StageOutcome = "continue" | "abort";
@@ -787,6 +797,24 @@ export async function runConsolidationPipeline(
   generation: RuntimeGeneration,
 ): Promise<void> {
   if (!runtime.isGenerationActive(generation)) return;
+  if (runtime.config.kvWarmWorkers !== "off") {
+    try {
+      const sessionId = ctx.sessionManager.getSessionId();
+      ctx = {
+        ...ctx,
+        kvWarmChain: getKvWarmChain(
+          runtime,
+          sessionId,
+          ctx.sessionManager,
+          ctx.model,
+          runtime.config.kvWarmStaleMs,
+        ),
+      };
+    } catch (error) {
+      if (isStaleExtensionContextError(error)) return;
+      throw error;
+    }
+  }
   const resolveModel = makeModelResolver(runtime, ctx, generation);
 
   runtime.consolidationPhase = "observer";
@@ -1382,35 +1410,43 @@ export async function runObserverStage(
     try {
       attempt += 1;
       const { runObserver } = await import("./agents/observer/agent.js");
+      const maxOutputTokens = workerOutputAllowance(effectiveObsCtx, resolved.model as any);
+      const thinkingLevel = stageThinkingLevel(runtime, "observer", stageModelForThinking);
+      const workerArgs = {
+        model: resolved.model as any,
+        apiKey: resolved.apiKey,
+        headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
+        env: resolved.env,
+        maxOutputTokens,
+        priorReflections,
+        priorObservations,
+        priorObservationIds: priorObservationRecords.map((o) => o.id),
+        chunk,
+        allowedSourceEntryIds: sourceEntryIds,
+        sourceEntryTimestamps,
+        maxTurns: options?.maxTurns ?? runtime.config.agentMaxTurns,
+        thinkingLevel,
+        providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
+        modelRegistry: ctx.modelRegistry,
+        sessionId,
+        cacheRetention: runtime.config.cacheRetention,
+      };
       const result = await runWorkerAttempt(
         "observer",
         runtime.config.workerAttemptTimeoutMs,
         generation.signal,
         (signal) =>
-          runObserver({
-            model: resolved.model as any,
-            apiKey: resolved.apiKey,
-            headers: withProviderAttributionHeaders(
-              resolved.model as any,
-              resolved.headers,
-              sessionId,
-            ),
-            env: resolved.env,
-            maxOutputTokens: workerOutputAllowance(effectiveObsCtx, resolved.model as any),
-            priorReflections,
-            priorObservations,
-            priorObservationIds: priorObservationRecords.map((o) => o.id),
-            chunk,
-            allowedSourceEntryIds: sourceEntryIds,
-            sourceEntryTimestamps,
-            maxTurns: options?.maxTurns ?? runtime.config.agentMaxTurns,
-            thinkingLevel: stageThinkingLevel(runtime, "observer", stageModelForThinking),
-            providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
-            signal,
-            modelRegistry: ctx.modelRegistry,
-            sessionId,
-            cacheRetention: runtime.config.cacheRetention,
-          }),
+          runWarmOrFallback(
+            ctx.kvWarmChain,
+            (chain) =>
+              runWarmObserver({
+                ...workerArgs,
+                chain,
+                inputBudget: observerInputBudget,
+                signal,
+              }),
+            () => runObserver({ ...workerArgs, signal }),
+          ),
       );
       if (!runtime.isGenerationActive(generation)) return "abort";
 
@@ -2174,33 +2210,41 @@ export async function runReflectorStage(
       });
       try {
         const { runReflector } = await import("./agents/reflector/agent.js");
+        const maxOutputTokens = workerOutputAllowance(best.ctx, bestModel);
+        const thinkingLevel = stageThinkingLevel(runtime, "reflector", stageModelForBatch);
+        const workerArgs = {
+          renderReflection,
+          timestampsEnabled: renderOptions.timestamps,
+          supersedesEnabled: renderOptions.supersedes,
+          supersedableReflectionIds: input.supersedableReflectionIds,
+          model: bestModel,
+          apiKey: best.resolved.apiKey,
+          headers: withProviderAttributionHeaders(bestModel, best.resolved.headers, sessionId),
+          env: best.resolved.env,
+          maxOutputTokens,
+          reflections: input.newReflections,
+          observations: batch,
+          existingReflectionsSummary: input.existingReflectionsSummary || undefined,
+          existingObservationsSummary: input.existingObservationsSummary || undefined,
+          maxTurns: runtime.config.agentMaxTurns,
+          thinkingLevel,
+          providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
+          modelRegistry: ctx.modelRegistry,
+          sessionId,
+          cacheRetention: runtime.config.cacheRetention,
+        };
+        const batchBudget = workerInputBudget(best.ctx, bestModel);
         const result = await runWorkerAttempt(
           "reflector",
           runtime.config.workerAttemptTimeoutMs,
           generation.signal,
           (signal) =>
-            runReflector({
-              renderReflection,
-              timestampsEnabled: renderOptions.timestamps,
-              supersedesEnabled: renderOptions.supersedes,
-              supersedableReflectionIds: input.supersedableReflectionIds,
-              model: bestModel,
-              apiKey: best.resolved.apiKey,
-              headers: withProviderAttributionHeaders(bestModel, best.resolved.headers, sessionId),
-              env: best.resolved.env,
-              maxOutputTokens: workerOutputAllowance(best.ctx, bestModel),
-              reflections: input.newReflections,
-              observations: batch,
-              existingReflectionsSummary: input.existingReflectionsSummary || undefined,
-              existingObservationsSummary: input.existingObservationsSummary || undefined,
-              maxTurns: runtime.config.agentMaxTurns,
-              thinkingLevel: stageThinkingLevel(runtime, "reflector", stageModelForBatch),
-              providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
-              signal,
-              modelRegistry: ctx.modelRegistry,
-              sessionId,
-              cacheRetention: runtime.config.cacheRetention,
-            }),
+            runWarmOrFallback(
+              ctx.kvWarmChain,
+              (chain) =>
+                runWarmReflector({ ...workerArgs, chain, inputBudget: batchBudget, signal }),
+              () => runReflector({ ...workerArgs, signal }),
+            ),
         );
         if (!runtime.isGenerationActive(generation))
           return { outcome: "abort", sameRunReflections: [] };
@@ -2326,37 +2370,45 @@ export async function runReflectorStage(
     try {
       attempt += 1;
       const { runReflector } = await import("./agents/reflector/agent.js");
+      const maxOutputTokens = workerOutputAllowance(effectiveRefCtx, resolved.model as any);
+      const thinkingLevel = stageThinkingLevel(runtime, "reflector", stageModelForThinking);
+      const workerArgs = {
+        renderReflection,
+        timestampsEnabled: renderOptions.timestamps,
+        supersedesEnabled: renderOptions.supersedes,
+        supersedableReflectionIds: input.supersedableReflectionIds,
+        model: resolved.model as any,
+        apiKey: resolved.apiKey,
+        headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
+        env: resolved.env,
+        maxOutputTokens,
+        reflections: input.newReflections,
+        observations: input.newObservations,
+        existingReflectionsSummary: input.existingReflectionsSummary || undefined,
+        existingObservationsSummary: input.existingObservationsSummary || undefined,
+        maxTurns: runtime.config.agentMaxTurns,
+        thinkingLevel,
+        providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
+        modelRegistry: ctx.modelRegistry,
+        sessionId,
+        cacheRetention: runtime.config.cacheRetention,
+      };
       const result = await runWorkerAttempt(
         "reflector",
         runtime.config.workerAttemptTimeoutMs,
         generation.signal,
         (signal) =>
-          runReflector({
-            renderReflection,
-            timestampsEnabled: renderOptions.timestamps,
-            supersedesEnabled: renderOptions.supersedes,
-            supersedableReflectionIds: input.supersedableReflectionIds,
-            model: resolved.model as any,
-            apiKey: resolved.apiKey,
-            headers: withProviderAttributionHeaders(
-              resolved.model as any,
-              resolved.headers,
-              sessionId,
-            ),
-            env: resolved.env,
-            maxOutputTokens: workerOutputAllowance(effectiveRefCtx, resolved.model as any),
-            reflections: input.newReflections,
-            observations: input.newObservations,
-            existingReflectionsSummary: input.existingReflectionsSummary || undefined,
-            existingObservationsSummary: input.existingObservationsSummary || undefined,
-            maxTurns: runtime.config.agentMaxTurns,
-            thinkingLevel: stageThinkingLevel(runtime, "reflector", stageModelForThinking),
-            providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
-            signal,
-            modelRegistry: ctx.modelRegistry,
-            sessionId,
-            cacheRetention: runtime.config.cacheRetention,
-          }),
+          runWarmOrFallback(
+            ctx.kvWarmChain,
+            (chain) =>
+              runWarmReflector({
+                ...workerArgs,
+                chain,
+                inputBudget: reflectorInputBudget,
+                signal,
+              }),
+            () => runReflector({ ...workerArgs, signal }),
+          ),
       );
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
@@ -2851,36 +2903,54 @@ export async function runDropperStage(
       });
       try {
         const { runDropper } = await import("./agents/dropper/agent.js");
-        const proposed = await runWorkerAttempt(
+        const maxOutputTokens = workerOutputAllowance(best.ctx, bestModel);
+        const thinkingLevel = stageThinkingLevel(runtime, "dropper", stageModelForBatch);
+        const workerArgs = {
+          renderReflection,
+          model: bestModel,
+          apiKey: best.resolved.apiKey,
+          headers: withProviderAttributionHeaders(bestModel, best.resolved.headers, sessionId),
+          env: best.resolved.env,
+          reflections: input.reflectionsForDropper,
+          observations: batch,
+          existingObservationsSummary: input.existingObservationsSummary || undefined,
+          budgetTokens: runtime.config.observationsPoolMaxTokens,
+          skipFullness: runtime.config.dropperPoolFullnessThreshold,
+          pressure: { tokens: poolTokens, maxDrops: globalMaxDrops },
+          rawProposals: true,
+          maxOutputTokens,
+          maxTurns: runtime.config.agentMaxTurns,
+          thinkingLevel,
+          providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
+          modelRegistry: ctx.modelRegistry,
+          sessionId,
+          cacheRetention: runtime.config.cacheRetention,
+        };
+        const batchBudget = workerInputBudget(best.ctx, bestModel);
+        const proposedResult = await runWorkerAttempt(
           "dropper",
           runtime.config.workerAttemptTimeoutMs,
           generation.signal,
           (signal) =>
-            runDropper({
-              renderReflection,
-              model: bestModel,
-              apiKey: best.resolved.apiKey,
-              headers: withProviderAttributionHeaders(bestModel, best.resolved.headers, sessionId),
-              env: best.resolved.env,
-              reflections: input.reflectionsForDropper,
-              observations: batch,
-              existingObservationsSummary: input.existingObservationsSummary || undefined,
-              budgetTokens: runtime.config.observationsPoolMaxTokens,
-              skipFullness: runtime.config.dropperPoolFullnessThreshold,
-              pressure: { tokens: poolTokens, maxDrops: globalMaxDrops },
-              rawProposals: true,
-              maxOutputTokens: workerOutputAllowance(best.ctx, bestModel),
-              maxTurns: runtime.config.agentMaxTurns,
-              thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForBatch),
-              providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
-              signal,
-              modelRegistry: ctx.modelRegistry,
-              sessionId,
-              cacheRetention: runtime.config.cacheRetention,
-            }),
+            runWarmOrFallback(
+              ctx.kvWarmChain,
+              async (chain) => {
+                const result = await runWarmDropper({
+                  ...workerArgs,
+                  chain,
+                  inputBudget: batchBudget,
+                  signal,
+                });
+                return result?.ok ? result : undefined;
+              },
+              async () => ({
+                ok: true as const,
+                value: await runDropper({ ...workerArgs, signal }),
+              }),
+            ),
         );
         if (!runtime.isGenerationActive(generation)) return "abort";
-        for (const id of proposed ?? []) {
+        for (const id of proposedResult.value ?? []) {
           if (!seen.has(id)) {
             seen.add(id);
             mergedProposals.push(id);
@@ -3004,38 +3074,49 @@ export async function runDropperStage(
     try {
       attempt += 1;
       const { runDropper } = await import("./agents/dropper/agent.js");
-      const droppedIds = await runWorkerAttempt(
+      const maxOutputTokens = workerOutputAllowance(effectiveDropCtx, resolved.model as any);
+      const thinkingLevel = stageThinkingLevel(runtime, "dropper", stageModelForThinking);
+      const workerArgs = {
+        renderReflection,
+        model: resolved.model as any,
+        apiKey: resolved.apiKey,
+        headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
+        env: resolved.env,
+        maxOutputTokens,
+        reflections: input.reflectionsForDropper,
+        observations: input.newObservations,
+        existingObservationsSummary: input.existingObservationsSummary || undefined,
+        budgetTokens: runtime.config.observationsPoolMaxTokens,
+        skipFullness: runtime.config.dropperPoolFullnessThreshold,
+        maxTurns: runtime.config.agentMaxTurns,
+        thinkingLevel,
+        providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
+        modelRegistry: ctx.modelRegistry,
+        sessionId,
+        cacheRetention: runtime.config.cacheRetention,
+      };
+      const dropperInputBudget = workerInputBudget(effectiveDropCtx, resolved.model as any);
+      const droppedResult = await runWorkerAttempt(
         "dropper",
         runtime.config.workerAttemptTimeoutMs,
         generation.signal,
         (signal) =>
-          runDropper({
-            renderReflection,
-            model: resolved.model as any,
-            apiKey: resolved.apiKey,
-            headers: withProviderAttributionHeaders(
-              resolved.model as any,
-              resolved.headers,
-              sessionId,
-            ),
-            env: resolved.env,
-            maxOutputTokens: workerOutputAllowance(effectiveDropCtx, resolved.model as any),
-            reflections: input.reflectionsForDropper,
-            observations: input.newObservations,
-            existingObservationsSummary: input.existingObservationsSummary || undefined,
-            budgetTokens: runtime.config.observationsPoolMaxTokens,
-            skipFullness: runtime.config.dropperPoolFullnessThreshold,
-            maxTurns: runtime.config.agentMaxTurns,
-            thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),
-            providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
-            signal,
-            modelRegistry: ctx.modelRegistry,
-            sessionId,
-            cacheRetention: runtime.config.cacheRetention,
-          }),
+          runWarmOrFallback(
+            ctx.kvWarmChain,
+            async (chain) => {
+              const result = await runWarmDropper({
+                ...workerArgs,
+                chain,
+                inputBudget: dropperInputBudget,
+                signal,
+              });
+              return result?.ok ? result : undefined;
+            },
+            async () => ({ ok: true as const, value: await runDropper({ ...workerArgs, signal }) }),
+          ),
       );
       if (!runtime.isGenerationActive(generation)) return "abort";
-      return commitDropperResult(droppedIds);
+      return commitDropperResult(droppedResult.value);
     } catch (error) {
       if (!runtime.isGenerationActive(generation)) return "abort";
       if (isStaleExtensionContextError(error)) {
