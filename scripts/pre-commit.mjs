@@ -3,7 +3,7 @@
 /**
  * Pre-commit hook — format and lint staged files only.
  * Mirrors pi-utils/scripts/pre-commit.mjs
- * 1. pnpm exec lint-staged  → oxfmt + oxlint --fix on staged files
+ * 1. Run lint-staged via pnpm (Corepack through cmd.exe on Windows)
  * 2. Re-stage anything that was modified
  */
 
@@ -24,7 +24,11 @@ function stagedFiles() {
 }
 
 const before = stagedFiles();
-run("pnpm", ["exec", "lint-staged"]);
+if (process.platform === "win32") {
+  run("cmd.exe", ["/d", "/s", "/c", "corepack pnpm exec lint-staged"]);
+} else {
+  run("pnpm", ["exec", "lint-staged"]);
+}
 const after = stagedFiles();
 const modified = after.filter((f) => before.includes(f));
 if (modified.length > 0) {

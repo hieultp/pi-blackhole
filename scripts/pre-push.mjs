@@ -23,6 +23,13 @@ function runSilent(command, args) {
   }
 }
 
+// No global pnpm on Windows — run it through corepack (same as pre-commit hook)
+function runPnpm(args) {
+  return process.platform === "win32"
+    ? runSilent("cmd.exe", ["/d", "/s", "/c", "corepack pnpm", ...args])
+    : runSilent("pnpm", args);
+}
+
 // Read stdin from git (lines of <local_ref> <local_sha> <remote_ref> <remote_sha>)
 import { readFileSync } from "node:fs";
 
@@ -79,13 +86,13 @@ if (changed.trim().length === 0) {
 
 if (nonDocs) {
   console.log("→ pnpm typecheck");
-  const tc = runSilent("pnpm", ["typecheck"]);
+  const tc = runPnpm(["typecheck"]);
   if (tc.status !== 0) {
     console.error(tc.stdout + tc.stderr);
     process.exit(1);
   }
   console.log("→ pnpm test");
-  const test = runSilent("pnpm", ["test"]);
+  const test = runPnpm(["test"]);
   // Filter to summary on success
   const out = test.stdout + test.stderr;
   if (test.status !== 0) {
